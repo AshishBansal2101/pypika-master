@@ -36,6 +36,7 @@ __email__ = "theys@kayak.com"
 class Selectable(Node):
     def __init__(self, alias: str) -> None:
         self.alias = alias
+        self._comments: List[str] = []
 
     @builder
     def as_(self, alias: str) -> "Selectable":
@@ -58,6 +59,11 @@ class Selectable(Node):
 
     def get_table_name(self) -> str:
         return self.alias
+
+    @builder
+    def comment(self, text: str) -> "QueryBuilder":
+        """Attach a top-level query comment (appears before SQL)."""
+        self._comments.append(text)
 
 
 class AliasedQuery(Selectable):
@@ -138,9 +144,14 @@ class Table(Selectable):
         self._query_cls = query_cls or Query
         self._for = None
         self._for_portion = None
+        self._comment: Optional[str] = None
         if not issubclass(self._query_cls, Query):
             raise TypeError("Expected 'query_cls' to be subclass of Query")
 
+    @builder
+    def comment(self, text: str) -> "Table":
+        """Attach an inline comment to this table (used in FROM/JOIN)."""
+        self._comment = text
     def get_table_name(self) -> str:
         return self.alias or self._table_name
 
@@ -159,7 +170,12 @@ class Table(Selectable):
                 table=table_sql, criterion=self._for_portion.get_sql(**kwargs)
             )
 
-        return format_alias_sql(table_sql, self.alias, **kwargs)
+        final_sql = format_alias_sql(table_sql, self.alias, **kwargs)
+
+        if self._comment:
+            return f"-- {self._comment}\n{final_sql}"
+
+        return final_sql
 
     @builder
     def for_(self, temporal_criterion: Criterion) -> "Table":
@@ -761,6 +777,8 @@ class QueryBuilder(Selectable, Term):
         self._wrapper_cls = wrapper_cls
 
         self.immutable = immutable
+        self._comments: List[str] = []
+
 
     def __copy__(self) -> "QueryBuilder":
         newone = type(self).__new__(type(self))
@@ -779,6 +797,11 @@ class QueryBuilder(Selectable, Term):
         newone._force_indexes = copy(self._force_indexes)
         newone._use_indexes = copy(self._use_indexes)
         return newone
+
+    @builder
+    def comment(self, text: str) -> "QueryBuilder":
+        """Attach a top-level query comment (appears before SQL at execution)."""
+        self._comments.append(text)
 
     @builder
     def from_(self, selectable: Union[Selectable, Query, str]) -> "QueryBuilder":
@@ -1368,7 +1391,12 @@ class QueryBuilder(Selectable, Term):
             )
             return format_alias_sql(querystring, self.alias, **kwargs)
 
-        return querystring
+        sql = querystring
+    # Prepend comments
+        if self._comments:
+           comments = "".join([f"-- {c}\n" for c in self._comments])
+           sql = comments + sql
+        return sql
 
     def _apply_pagination(self, querystring: str, **kwargs) -> str:
         if self._limit is not None:
@@ -1791,12 +1819,16 @@ class CreateQueryBuilder:
         self._foreign_key_reference = None
         self._foreign_key_on_update: ReferenceOption = None
         self._foreign_key_on_delete: ReferenceOption = None
+        self._comments: List[str] = [] 
 
     def _set_kwargs_defaults(self, kwargs: dict) -> None:
         kwargs.setdefault("quote_char", self.QUOTE_CHAR)
         kwargs.setdefault("secondary_quote_char", self.SECONDARY_QUOTE_CHAR)
         kwargs.setdefault("dialect", self.dialect)
-
+    @builder
+    def comment(self, text: str) -> "CreateQueryBuilder":
+        """Attach a comment to the CREATE statement."""
+        self._comments.append(text)
     @builder
     def create_table(self, table: Union[Table, str]) -> "CreateQueryBuilder":
         """
@@ -2028,9 +2060,14 @@ class CreateQueryBuilder:
         body = self._body_sql(**kwargs)
         table_options = self._table_options_sql(**kwargs)
 
-        return "{create_table} ({body}){table_options}".format(
+        sql = superlogic_here = "{create_table} ({body}){table_options}".format(
             create_table=create_table, body=body, table_options=table_options
         )
+        if self._comments:
+            comments = "".join([f"-- {c}\n" for c in self._comments])
+            sql = comments + sql
+
+        return sql
 
     def _create_table_sql(self, **kwargs: Any) -> str:
         table_type = ''
@@ -2122,7 +2159,12 @@ class CreateIndexBuilder:
         self._wheres = None
         self._is_unique = False
         self._if_not_exists = False
+        self._comments: List[str] = [] 
 
+
+    @builder
+    def comment(self, text: str) -> "CreateIndexBuilder":
+        self._comments.append(text)
     @builder
     def create_index(self, index: Union[str, Index]) -> "CreateIndexBuilder":
         self._index = index
@@ -2169,7 +2211,12 @@ class CreateIndexBuilder:
         base_sql = f"CREATE {unique_str} INDEX {if_not_exists_str} {self._index} ON {self._table}({columns_str})"
         if self._wheres:
             base_sql += f" WHERE {self._wheres}"
-        return base_sql.replace("  ", " ")
+        sql = base_sql.replace("  ", " ")
+        if self._comments:
+            comments = "".join([f"-- {c}\n" for c in self._comments])
+            sql = comments + sql
+
+        return sql
 
     def __str__(self) -> str:
         return self.get_sql()
@@ -2193,12 +2240,16 @@ class DropQueryBuilder:
         self._drop_target: Union[Database, Table, str] = ""
         self._if_exists = None
         self.dialect = dialect
+        self._comments: List[str] = []
 
     def _set_kwargs_defaults(self, kwargs: dict) -> None:
         kwargs.setdefault("quote_char", self.QUOTE_CHAR)
         kwargs.setdefault("secondary_quote_char", self.SECONDARY_QUOTE_CHAR)
         kwargs.setdefault("dialect", self.dialect)
-
+    @builder
+    def comment(self, text: str) -> "DropQueryBuilder":
+        self._comments.append(text)
+        
     @builder
     def drop_database(self, database: Union[Database, str]) -> "DropQueryBuilder":
         target = database if isinstance(database, Database) else Database(database)
@@ -2244,9 +2295,14 @@ class DropQueryBuilder:
         else:
             target_name = format_quotes(self._drop_target, self.QUOTE_CHAR)
 
-        return "DROP {kind} {if_exists}{name}".format(
+        sql = superlogic_here = "DROP {kind} {if_exists}{name}".format(
             kind=self._drop_target_kind, if_exists=if_exists, name=target_name
         )
+        if self._comments:
+            comments = "".join([f"-- {c}\n" for c in self._comments])
+            sql = comments + sql
+
+        return sql
 
     def __str__(self) -> str:
         return self.get_sql()
